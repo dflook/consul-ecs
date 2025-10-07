@@ -7,8 +7,17 @@
 # Every target has a BIN_NAME argument that must be provided via --build-arg=BIN_NAME=<name>
 # when building.
 
+# Build stage for consul-ecs binary
+FROM golang:1.23.6-alpine AS builder
+ARG BIN_NAME=consul-ecs
+ARG LDFLAGS="-s -w"
+
+WORKDIR /build
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="$LDFLAGS" -o $BIN_NAME .
+
 # go-discover builds the discover binary
-FROM golang:1.23.6-alpine as go-discover
+FROM golang:1.23.6-alpine AS go-discover
 RUN CGO_ENABLED=0 go install github.com/hashicorp/go-discover/cmd/discover@214571b6a5309addf3db7775f4ee8cf4d264fd5f
 
 FROM docker.mirror.hashicorp.services/alpine:latest AS release-default
@@ -64,7 +73,7 @@ RUN ln -s /lib/libc.so.6 /usr/lib/libresolv.so.2
 
 USER $BIN_NAME
 ENTRYPOINT ["/bin/consul-ecs"]
-COPY dist/$TARGETOS/$TARGETARCH/$BIN_NAME /bin/
+COPY --from=builder /build/$BIN_NAME /bin/
 COPY LICENSE /usr/share/doc/$PRODUCT_NAME/LICENSE.txt
 COPY --from=go-discover /go/bin/discover /bin/
 

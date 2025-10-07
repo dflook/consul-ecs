@@ -145,7 +145,7 @@ func TestRun(t *testing.T) {
 					status:  ecs.HealthStatusUnhealthy,
 				},
 			},
-			expectedDataplaneHealthStatus: api.HealthPassing,
+			expectedDataplaneHealthStatus: api.HealthCritical,
 			consulLogin:                   consulLoginCfg,
 		},
 		"two unhealthy health sync containers": {
@@ -201,10 +201,10 @@ func TestRun(t *testing.T) {
 				},
 				"container-2": {
 					missing: true,
-					status:  ecs.HealthStatusUnhealthy,
+					status:  ecs.HealthStatusHealthy,
 				},
 			},
-			expectedDataplaneHealthStatus:   api.HealthPassing,
+			expectedDataplaneHealthStatus:   api.HealthCritical,
 			shouldMissingContainersReappear: true,
 			consulLogin:                     consulLoginCfg,
 		},
@@ -381,6 +381,7 @@ func TestRun(t *testing.T) {
 					if expCheck.CheckID == checkID {
 						if hsc.missing {
 							expCheck.Status = api.HealthCritical
+							markDataplaneContainerUnhealthy = true
 						} else {
 							expCheck.Status = ecsHealthToConsulHealth(hsc.status)
 							// If there are multiple health sync containers and one of them is unhealthy
@@ -446,8 +447,9 @@ func TestRun(t *testing.T) {
 			if c.shouldMissingContainersReappear {
 				// Mark all containers as non missing
 				c.missingDataplaneContainer = false
-				for _, hsc := range c.healthSyncContainers {
+				for name, hsc := range c.healthSyncContainers {
 					hsc.missing = false
+					c.healthSyncContainers[name] = hsc
 				}
 
 				// Add the containers data into task meta response

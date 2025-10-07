@@ -110,8 +110,13 @@ func (c *Command) syncChecks(consulClient *api.Client,
 	serviceName := c.constructServiceName(taskMeta.Family)
 	containersToSync, missingContainers := findContainersToSync(parsedContainerNames, taskMeta)
 
+	// Initialize overall dataplane health status
+	overallDataplaneHealthStatus := ecs.HealthStatusHealthy
+
 	// Mark the Consul health status as critical for missing containers
 	for _, name := range missingContainers {
+		// If any container is missing, overall health must be unhealthy
+		overallDataplaneHealthStatus = ecs.HealthStatusUnhealthy
 		checkID := constructCheckID(makeServiceID(serviceName, taskMeta.TaskID()), name)
 		c.log.Debug("marking container as unhealthy since it wasn't found in the task metadata", "name", name)
 
@@ -162,7 +167,11 @@ func (c *Command) syncChecks(consulClient *api.Client,
 		}
 
 	}
-	overallDataplaneHealthStatus, ok := parsedContainers[config.ConsulDataplaneContainerName]
+	dataplaneHealthStatus, ok := parsedContainers[config.ConsulDataplaneContainerName]
+	if dataplaneHealthStatus == ecs.HealthStatusUnhealthy {
+		overallDataplaneHealthStatus = ecs.HealthStatusUnhealthy
+	}
+
 	// if dataplane container exist and healthy then proceed to checking the other containers health
 	if ok && overallDataplaneHealthStatus == ecs.HealthStatusHealthy {
 		//

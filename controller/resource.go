@@ -561,9 +561,11 @@ func (t *TaskState) DeregisterServices(consulClient *api.Client) error {
 		_, err := consulClient.Catalog().Deregister(deregInput, opts)
 		if err != nil {
 			result = multierror.Append(result, fmt.Errorf("deregistering service with ID %s: %w", svc.ID, err))
+		} else {
+			t.Log.Info("service deregistered", "service-id", svc.ID, "task-id", t.TaskID)
 		}
 	}
-	return nil
+	return result
 }
 
 // Namespace returns the namespace that the service belongs to.

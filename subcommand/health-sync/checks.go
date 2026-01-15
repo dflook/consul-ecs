@@ -187,9 +187,16 @@ func (c *Command) syncChecks(consulClient *api.Client,
 		overallDataplaneHealthStatus = ecs.HealthStatusUnhealthy
 	}
 
-	err = c.handleHealthForDataplaneContainer(consulClient, taskMeta.TaskID(), serviceName, clusterARN, config.ConsulDataplaneContainerName, overallDataplaneHealthStatus)
-	if err != nil {
-		c.log.Warn("failed to update Consul health status", "err", err)
+	// Only update dataplane health in Consul if it has changed.
+	// Use a separate key to track overall health, distinct from the individual container status.
+	const overallHealthKey = "overall-dataplane-health"
+	if overallDataplaneHealthStatus != currentStatuses[overallHealthKey] {
+		err = c.handleHealthForDataplaneContainer(consulClient, taskMeta.TaskID(), serviceName, clusterARN, config.ConsulDataplaneContainerName, overallDataplaneHealthStatus)
+		if err != nil {
+			c.log.Warn("failed to update Consul health status", "err", err)
+		} else {
+			currentStatuses[overallHealthKey] = overallDataplaneHealthStatus
+		}
 	}
 
 	return currentStatuses

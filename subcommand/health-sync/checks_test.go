@@ -25,7 +25,7 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 	cases := map[string]struct {
 		containerNames []string
 		taskMeta       awsutil.ECSTaskMeta
-		expected       map[string]string
+		expected       map[string]containerHealth
 	}{
 		"all containers present and healthy": {
 			containerNames: []string{"app", "sidecar"},
@@ -35,9 +35,9 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 					{Name: "sidecar", Health: awsutil.ECSTaskMetaHealth{Status: ecs.HealthStatusHealthy}},
 				},
 			},
-			expected: map[string]string{
-				"app":     ecs.HealthStatusHealthy,
-				"sidecar": ecs.HealthStatusHealthy,
+			expected: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 		},
 		"one container unhealthy": {
@@ -48,9 +48,9 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 					{Name: "sidecar", Health: awsutil.ECSTaskMetaHealth{Status: ecs.HealthStatusUnhealthy}},
 				},
 			},
-			expected: map[string]string{
-				"app":     ecs.HealthStatusHealthy,
-				"sidecar": ecs.HealthStatusUnhealthy,
+			expected: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
 			},
 		},
 		"container missing from metadata": {
@@ -60,17 +60,17 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 					{Name: "app", Health: awsutil.ECSTaskMetaHealth{Status: ecs.HealthStatusHealthy}},
 				},
 			},
-			expected: map[string]string{
-				"app":     ecs.HealthStatusHealthy,
-				"sidecar": ecs.HealthStatusUnhealthy,
+			expected: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusUnhealthy, missing: true},
 			},
 		},
 		"all containers missing": {
 			containerNames: []string{"app", "sidecar"},
 			taskMeta:       awsutil.ECSTaskMeta{},
-			expected: map[string]string{
-				"app":     ecs.HealthStatusUnhealthy,
-				"sidecar": ecs.HealthStatusUnhealthy,
+			expected: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusUnhealthy, missing: true},
+				"sidecar": {ecsStatus: ecs.HealthStatusUnhealthy, missing: true},
 			},
 		},
 		"empty container list": {
@@ -80,7 +80,7 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 					{Name: "app", Health: awsutil.ECSTaskMetaHealth{Status: ecs.HealthStatusHealthy}},
 				},
 			},
-			expected: map[string]string{},
+			expected: map[string]containerHealth{},
 		},
 		"extra containers in metadata ignored": {
 			containerNames: []string{"app"},
@@ -90,8 +90,8 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 					{Name: "extra", Health: awsutil.ECSTaskMetaHealth{Status: ecs.HealthStatusHealthy}},
 				},
 			},
-			expected: map[string]string{
-				"app": ecs.HealthStatusHealthy,
+			expected: map[string]containerHealth{
+				"app": {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 		},
 		"unknown status preserved": {
@@ -101,8 +101,8 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 					{Name: "app", Health: awsutil.ECSTaskMetaHealth{Status: ecs.HealthStatusUnknown}},
 				},
 			},
-			expected: map[string]string{
-				"app": ecs.HealthStatusUnknown,
+			expected: map[string]containerHealth{
+				"app": {ecsStatus: ecs.HealthStatusUnknown, missing: false},
 			},
 		},
 	}
@@ -117,52 +117,59 @@ func TestGetContainerHealthStatuses(t *testing.T) {
 
 func TestComputeOverallDataplaneHealth(t *testing.T) {
 	cases := map[string]struct {
-		containerStatuses map[string]string
+		containerStatuses map[string]containerHealth
 		expected          string
 	}{
 		"all healthy": {
-			containerStatuses: map[string]string{
-				"app":     ecs.HealthStatusHealthy,
-				"sidecar": ecs.HealthStatusHealthy,
+			containerStatuses: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 			expected: ecs.HealthStatusHealthy,
 		},
 		"one unhealthy": {
-			containerStatuses: map[string]string{
-				"app":     ecs.HealthStatusHealthy,
-				"sidecar": ecs.HealthStatusUnhealthy,
+			containerStatuses: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
 			},
 			expected: ecs.HealthStatusUnhealthy,
 		},
 		"one unknown": {
-			containerStatuses: map[string]string{
-				"app":     ecs.HealthStatusHealthy,
-				"sidecar": ecs.HealthStatusUnknown,
+			containerStatuses: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusUnknown, missing: false},
 			},
 			expected: ecs.HealthStatusUnhealthy,
 		},
 		"all unhealthy": {
-			containerStatuses: map[string]string{
-				"app":     ecs.HealthStatusUnhealthy,
-				"sidecar": ecs.HealthStatusUnhealthy,
+			containerStatuses: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
+			},
+			expected: ecs.HealthStatusUnhealthy,
+		},
+		"one missing": {
+			containerStatuses: map[string]containerHealth{
+				"app":     {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				"sidecar": {ecsStatus: ecs.HealthStatusUnhealthy, missing: true},
 			},
 			expected: ecs.HealthStatusUnhealthy,
 		},
 		"empty map treated as unhealthy": {
 			// This should not happen in practice since containerNames always
 			// includes at least the dataplane container. Treated as unhealthy to be safe.
-			containerStatuses: map[string]string{},
+			containerStatuses: map[string]containerHealth{},
 			expected:          ecs.HealthStatusUnhealthy,
 		},
 		"single healthy": {
-			containerStatuses: map[string]string{
-				"app": ecs.HealthStatusHealthy,
+			containerStatuses: map[string]containerHealth{
+				"app": {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 			expected: ecs.HealthStatusHealthy,
 		},
 		"single unhealthy": {
-			containerStatuses: map[string]string{
-				"app": ecs.HealthStatusUnhealthy,
+			containerStatuses: map[string]containerHealth{
+				"app": {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
 			},
 			expected: ecs.HealthStatusUnhealthy,
 		},
@@ -178,7 +185,7 @@ func TestComputeOverallDataplaneHealth(t *testing.T) {
 
 func TestComputeCheckStatuses(t *testing.T) {
 	const (
-		serviceID        = "test-service-12345"
+		serviceID          = "test-service-12345"
 		dataplaneContainer = config.ConsulDataplaneContainerName
 	)
 
@@ -191,16 +198,16 @@ func TestComputeCheckStatuses(t *testing.T) {
 	cases := map[string]struct {
 		isGateway              bool
 		containerNames         []string
-		containerStatuses      map[string]string
+		containerStatuses      map[string]containerHealth
 		expectedConsulStatuses map[string]string
-		expectedOutputs        map[string]string // optional, only checked if non-nil
+		expectedOutputs        map[string]string
 	}{
 		"non-gateway all healthy": {
 			isGateway:      false,
 			containerNames: []string{"app", dataplaneContainer},
-			containerStatuses: map[string]string{
-				"app":              ecs.HealthStatusHealthy,
-				dataplaneContainer: ecs.HealthStatusHealthy,
+			containerStatuses: map[string]containerHealth{
+				"app":              {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 			expectedConsulStatuses: map[string]string{
 				appCheckID:     api.HealthPassing,
@@ -208,15 +215,17 @@ func TestComputeCheckStatuses(t *testing.T) {
 				proxyCheckID:   api.HealthPassing,
 			},
 			expectedOutputs: map[string]string{
-				appCheckID: fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusHealthy, appCheckID),
+				appCheckID:     fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusHealthy, appCheckID),
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusHealthy),
+				proxyCheckID:   fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusHealthy),
 			},
 		},
 		"non-gateway app unhealthy affects overall health": {
 			isGateway:      false,
 			containerNames: []string{"app", dataplaneContainer},
-			containerStatuses: map[string]string{
-				"app":              ecs.HealthStatusUnhealthy,
-				dataplaneContainer: ecs.HealthStatusHealthy,
+			containerStatuses: map[string]containerHealth{
+				"app":              {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 			expectedConsulStatuses: map[string]string{
 				appCheckID:     api.HealthCritical,
@@ -224,63 +233,102 @@ func TestComputeCheckStatuses(t *testing.T) {
 				proxyCheckID:   api.HealthCritical,
 			},
 			expectedOutputs: map[string]string{
-				appCheckID: fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusUnhealthy, appCheckID),
+				appCheckID:     fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusUnhealthy, appCheckID),
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy),
+				proxyCheckID:   fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy),
+			},
+		},
+		"non-gateway app missing affects overall health": {
+			isGateway:      false,
+			containerNames: []string{"app", dataplaneContainer},
+			containerStatuses: map[string]containerHealth{
+				"app":              {ecsStatus: ecs.HealthStatusUnhealthy, missing: true},
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+			},
+			expectedConsulStatuses: map[string]string{
+				appCheckID:     api.HealthCritical,
+				serviceCheckID: api.HealthCritical,
+				proxyCheckID:   api.HealthCritical,
+			},
+			expectedOutputs: map[string]string{
+				appCheckID:     fmt.Sprintf("Container %q not found in ECS task metadata", "app"),
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy),
+				proxyCheckID:   fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy),
 			},
 		},
 		"non-gateway dataplane unhealthy": {
 			isGateway:      false,
 			containerNames: []string{"app", dataplaneContainer},
-			containerStatuses: map[string]string{
-				"app":              ecs.HealthStatusHealthy,
-				dataplaneContainer: ecs.HealthStatusUnhealthy,
+			containerStatuses: map[string]containerHealth{
+				"app":              {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
 			},
 			expectedConsulStatuses: map[string]string{
 				appCheckID:     api.HealthPassing,
 				serviceCheckID: api.HealthCritical,
 				proxyCheckID:   api.HealthCritical,
 			},
+			expectedOutputs: map[string]string{
+				appCheckID:     fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusHealthy, appCheckID),
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy),
+				proxyCheckID:   fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy),
+			},
 		},
 		"non-gateway dataplane only": {
 			isGateway:      false,
 			containerNames: []string{dataplaneContainer},
-			containerStatuses: map[string]string{
-				dataplaneContainer: ecs.HealthStatusHealthy,
+			containerStatuses: map[string]containerHealth{
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 			expectedConsulStatuses: map[string]string{
 				serviceCheckID: api.HealthPassing,
 				proxyCheckID:   api.HealthPassing,
 			},
+			expectedOutputs: map[string]string{
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusHealthy),
+				proxyCheckID:   fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusHealthy),
+			},
 		},
 		"gateway healthy": {
 			isGateway:      true,
 			containerNames: []string{dataplaneContainer},
-			containerStatuses: map[string]string{
-				dataplaneContainer: ecs.HealthStatusHealthy,
+			containerStatuses: map[string]containerHealth{
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 			expectedConsulStatuses: map[string]string{
 				serviceCheckID: api.HealthPassing,
+			},
+			expectedOutputs: map[string]string{
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusHealthy),
 			},
 		},
 		"gateway unhealthy": {
 			isGateway:      true,
 			containerNames: []string{dataplaneContainer},
-			containerStatuses: map[string]string{
-				dataplaneContainer: ecs.HealthStatusUnhealthy,
+			containerStatuses: map[string]containerHealth{
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusUnhealthy, missing: false},
 			},
 			expectedConsulStatuses: map[string]string{
 				serviceCheckID: api.HealthCritical,
+			},
+			expectedOutputs: map[string]string{
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy),
 			},
 		},
 		"gateway no proxy check": {
 			isGateway:      true,
 			containerNames: []string{"app", dataplaneContainer},
-			containerStatuses: map[string]string{
-				"app":              ecs.HealthStatusHealthy,
-				dataplaneContainer: ecs.HealthStatusHealthy,
+			containerStatuses: map[string]containerHealth{
+				"app":              {ecsStatus: ecs.HealthStatusHealthy, missing: false},
+				dataplaneContainer: {ecsStatus: ecs.HealthStatusHealthy, missing: false},
 			},
 			expectedConsulStatuses: map[string]string{
 				appCheckID:     api.HealthPassing,
 				serviceCheckID: api.HealthPassing,
+			},
+			expectedOutputs: map[string]string{
+				appCheckID:     fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusHealthy, appCheckID),
+				serviceCheckID: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusHealthy),
 			},
 		},
 	}
@@ -303,7 +351,7 @@ func TestComputeCheckStatuses(t *testing.T) {
 				require.Equal(t, expectedStatus, result[checkID].consulStatus, "consul status mismatch for %s", checkID)
 			}
 
-			// Check output messages if specified
+			// Check output messages
 			for checkID, expectedOutput := range tc.expectedOutputs {
 				require.Equal(t, expectedOutput, result[checkID].output, "output mismatch for %s", checkID)
 			}

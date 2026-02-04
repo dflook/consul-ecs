@@ -19,6 +19,12 @@ type checkStatus struct {
 	output       string // the message to display in Consul
 }
 
+// containerHealth holds the health status for a container.
+type containerHealth struct {
+	ecsStatus string // ecs.HealthStatusHealthy or ecs.HealthStatusUnhealthy
+	missing   bool   // true if container not found in task metadata
+}
+
 // fetchHealthChecks fetches the Consul health checks for both the service
 // and proxy registrations
 func (c *Command) fetchHealthChecks(consulClient *api.Client, taskMeta awsutil.ECSTaskMeta) (map[string]*api.HealthCheck, error) {
@@ -77,17 +83,20 @@ func (c *Command) setChecksCritical(consulClient *api.Client, taskMeta awsutil.E
 	serviceID := makeServiceID(serviceName, taskMeta.TaskID())
 
 	// Create a map with all containers as unhealthy to get all check IDs
-	containerStatuses := make(map[string]string)
+	containerStatuses := make(map[string]containerHealth)
 	for _, name := range containerNames {
-		containerStatuses[name] = ecs.HealthStatusUnhealthy
+		containerStatuses[name] = containerHealth{ecsStatus: ecs.HealthStatusUnhealthy, missing: false}
 	}
 
 	// Use computeCheckStatuses to get all check IDs
 	checkStatuses := c.computeCheckStatuses(serviceID, containerNames, containerStatuses)
 
-	// Update all checks to critical
-	for checkID, status := range checkStatuses {
-		err := c.updateConsulHealthStatus(consulClient, checkID, clusterARN, status)
+	// Update all checks to critical with shutdown message
+	for checkID := range checkStatuses {
+		err := c.updateConsulHealthStatus(consulClient, checkID, clusterARN, checkStatus{
+			consulStatus: api.HealthCritical,
+			output:       "Graceful shutdown in progress",
+		})
 		if err != nil {
 			c.log.Warn("failed to set Consul health status to critical", "err", err, "checkID", checkID)
 			result = multierror.Append(result, err)
@@ -101,30 +110,31 @@ func (c *Command) setChecksCritical(consulClient *api.Client, taskMeta awsutil.E
 
 
 // computeOverallDataplaneHealth computes the aggregate health status.
-// Returns UNHEALTHY if any container is unhealthy.
-func computeOverallDataplaneHealth(containerStatuses map[string]string) string {
+// Returns UNHEALTHY if any container is unhealthy or missing.
+func computeOverallDataplaneHealth(containerStatuses map[string]containerHealth) string {
 	if len(containerStatuses) == 0 {
-        // This should not be possible in practice since containerNames always
-        // includes at least the dataplane container. Treat as unhealthy to be safe.
+		// This should not be possible in practice since containerNames always
+		// includes at least the dataplane container. Treat as unhealthy to be safe.
 		return ecs.HealthStatusUnhealthy
 	}
 
-	for _, status := range containerStatuses {
-		if status != ecs.HealthStatusHealthy {
+	for _, health := range containerStatuses {
+		if health.ecsStatus != ecs.HealthStatusHealthy {
 			return ecs.HealthStatusUnhealthy
 		}
 	}
 	return ecs.HealthStatusHealthy
 }
 
-// computeCheckStatuses computes the desired Consul health status for each check.
+// computeCheckStatuses computes the desired Consul health status and output message for each check.
 // Returns a map of checkID -> checkStatus containing both Consul status and output message.
-func (c *Command) computeCheckStatuses(serviceID string, containerNames []string, containerStatuses map[string]string) map[string]checkStatus {
+func (c *Command) computeCheckStatuses(serviceID string, containerNames []string, containerStatuses map[string]containerHealth) map[string]checkStatus {
 	checkStatuses := make(map[string]checkStatus)
 
 	// Overall dataplane health is the aggregate of all container statuses
 	overallECSHealth := computeOverallDataplaneHealth(containerStatuses)
 	overallConsulHealth := ecsHealthToConsulHealth(overallECSHealth)
+	dataplaneOutput := fmt.Sprintf("Aggregate ECS health status is %q", overallECSHealth)
 
 	for _, name := range containerNames {
 		if name == config.ConsulDataplaneContainerName {
@@ -132,7 +142,7 @@ func (c *Command) computeCheckStatuses(serviceID string, containerNames []string
 			serviceCheckID := constructCheckID(serviceID, name)
 			checkStatuses[serviceCheckID] = checkStatus{
 				consulStatus: overallConsulHealth,
-				output:       fmt.Sprintf("ECS health status is %q for container %q", overallECSHealth, serviceCheckID),
+				output:       dataplaneOutput,
 			}
 
 			// Non-gateways also have a proxy check
@@ -141,16 +151,24 @@ func (c *Command) computeCheckStatuses(serviceID string, containerNames []string
 				proxyCheckID := constructCheckID(proxySvcID, name)
 				checkStatuses[proxyCheckID] = checkStatus{
 					consulStatus: overallConsulHealth,
-					output:       fmt.Sprintf("ECS health status is %q for container %q", overallECSHealth, proxyCheckID),
+					output:       dataplaneOutput,
 				}
 			}
 		} else {
 			// Non-dataplane containers map directly to their individual check
 			checkID := constructCheckID(serviceID, name)
-			ecsHealth := containerStatuses[name]
+			health := containerStatuses[name]
+
+			var output string
+			if health.missing {
+				output = fmt.Sprintf("Container %q not found in ECS task metadata", name)
+			} else {
+				output = fmt.Sprintf("ECS health status is %q for container %q", health.ecsStatus, checkID)
+			}
+
 			checkStatuses[checkID] = checkStatus{
-				consulStatus: ecsHealthToConsulHealth(ecsHealth),
-				output:       fmt.Sprintf("ECS health status is %q for container %q", ecsHealth, checkID),
+				consulStatus: ecsHealthToConsulHealth(health.ecsStatus),
+				output:       output,
 			}
 		}
 	}
@@ -235,23 +253,27 @@ func constructCheckID(serviceID, containerName string) string {
 	return fmt.Sprintf("%s-%s", serviceID, containerName)
 }
 
-// getContainerHealthStatuses builds a map of container name to ECS health status.
-// Missing containers are assigned ecs.HealthStatusUnhealthy.
-func getContainerHealthStatuses(containerNames []string, taskMeta awsutil.ECSTaskMeta) map[string]string {
-	statuses := make(map[string]string)
+// getContainerHealthStatuses builds a map of container name to health status.
+// Missing containers are marked as unhealthy with missing=true.
+func getContainerHealthStatuses(containerNames []string, taskMeta awsutil.ECSTaskMeta) map[string]containerHealth {
+	statuses := make(map[string]containerHealth)
 
 	// Build a lookup map from task metadata
 	taskContainers := make(map[string]string)
 	for _, container := range taskMeta.Containers {
-		taskContainers[container.Name] = container.Health.Status
+		status := container.Health.Status
+		if status == "" {
+			status = ecs.HealthStatusUnknown
+		}
+		taskContainers[container.Name] = status
 	}
 
 	// Map each requested container to its status
 	for _, name := range containerNames {
 		if status, found := taskContainers[name]; found {
-			statuses[name] = status
+			statuses[name] = containerHealth{ecsStatus: status, missing: false}
 		} else {
-			statuses[name] = ecs.HealthStatusUnhealthy
+			statuses[name] = containerHealth{ecsStatus: ecs.HealthStatusUnhealthy, missing: true}
 		}
 	}
 

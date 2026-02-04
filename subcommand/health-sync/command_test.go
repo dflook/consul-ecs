@@ -949,6 +949,7 @@ type expectedCheck struct {
 	serviceName string
 	checkID     string
 	status      string // api.HealthPassing or api.HealthCritical
+	output      string // expected output message (optional, only checked if non-empty)
 }
 
 // assertCheckStatuses verifies all expected checks exist and have the expected status, with retries
@@ -966,6 +967,9 @@ func assertCheckStatuses(t *testing.T, client *api.Client, expectedChecks []expe
 			require.NoError(r, err)
 			require.Len(r, checks, 1, "expected exactly one check with ID %s", exp.checkID)
 			require.Equal(r, exp.status, checks[0].Status, "check %s has unexpected status", exp.checkID)
+			if exp.output != "" {
+				require.Equal(r, exp.output, checks[0].Output, "check %s has unexpected output", exp.checkID)
+			}
 		}
 	})
 }
@@ -987,14 +991,20 @@ func extractUpdatedCheckIDs(logContent string) map[string]bool {
 // getExpectedUpdatedCheckIDs returns the set of checkIDs that should have been updated
 // (i.e., those whose status changed between before and after)
 func getExpectedUpdatedCheckIDs(before, after []expectedCheck) map[string]bool {
-	beforeStatus := make(map[string]string)
+	beforeChecks := make(map[string]expectedCheck)
 	for _, c := range before {
-		beforeStatus[c.checkID] = c.status
+		beforeChecks[c.checkID] = c
 	}
 
 	expected := make(map[string]bool)
 	for _, c := range after {
-		if beforeStatus[c.checkID] != c.status {
+		prev := beforeChecks[c.checkID]
+		// Update expected if status changed
+		if prev.status != c.status {
+			expected[c.checkID] = true
+		}
+		// Also update expected if output changed (when output is specified in both)
+		if c.output != "" && prev.output != "" && prev.output != c.output {
 			expected[c.checkID] = true
 		}
 	}
@@ -1203,8 +1213,10 @@ func TestSyncChecks_ChangeDetection(t *testing.T) {
 				config.ConsulDataplaneContainerName: ecs.HealthStatusHealthy,
 			},
 			expectedChecksAfterUpdate: []expectedCheck{
-				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-app", serviceName, taskID), status: api.HealthCritical},
-				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-consul-dataplane", serviceName, taskID), status: api.HealthCritical},
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-app", serviceName, taskID), status: api.HealthCritical,
+					output: fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusUnhealthy, fmt.Sprintf("%s-%s-app", serviceName, taskID))},
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-consul-dataplane", serviceName, taskID), status: api.HealthCritical,
+					output: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusUnhealthy)},
 				{serviceName: proxyServiceName, checkID: fmt.Sprintf("%s-%s-sidecar-proxy-consul-dataplane", serviceName, taskID), status: api.HealthCritical},
 			},
 		},
@@ -1249,8 +1261,10 @@ func TestSyncChecks_ChangeDetection(t *testing.T) {
 				config.ConsulDataplaneContainerName: ecs.HealthStatusHealthy,
 			},
 			expectedChecksAfterUpdate: []expectedCheck{
-				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-app", serviceName, taskID), status: api.HealthPassing},
-				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-consul-dataplane", serviceName, taskID), status: api.HealthPassing},
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-app", serviceName, taskID), status: api.HealthPassing,
+					output: fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusHealthy, fmt.Sprintf("%s-%s-app", serviceName, taskID))},
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-consul-dataplane", serviceName, taskID), status: api.HealthPassing,
+					output: fmt.Sprintf("Aggregate ECS health status is %q", ecs.HealthStatusHealthy)},
 				{serviceName: proxyServiceName, checkID: fmt.Sprintf("%s-%s-sidecar-proxy-consul-dataplane", serviceName, taskID), status: api.HealthPassing},
 			},
 		},
@@ -1314,6 +1328,33 @@ func TestSyncChecks_ChangeDetection(t *testing.T) {
 				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-app", serviceName, taskID), status: api.HealthPassing},
 				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-consul-dataplane", serviceName, taskID), status: api.HealthPassing},
 				{serviceName: proxyServiceName, checkID: fmt.Sprintf("%s-%s-sidecar-proxy-consul-dataplane", serviceName, taskID), status: api.HealthPassing},
+			},
+		},
+		"missing to unhealthy should update output": {
+			// Container goes from missing (critical) to present-but-unhealthy (critical).
+			// Status stays critical, but output message should change.
+			healthSyncContainers: []string{"app"},
+			startingContainers: map[string]string{
+				// app is missing
+				config.ConsulDataplaneContainerName: ecs.HealthStatusHealthy,
+			},
+			expectedChecksBeforeUpdate: []expectedCheck{
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-app", serviceName, taskID), status: api.HealthCritical,
+					output: fmt.Sprintf("Container %q not found in ECS task metadata", "app")},
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-consul-dataplane", serviceName, taskID), status: api.HealthCritical},
+				{serviceName: proxyServiceName, checkID: fmt.Sprintf("%s-%s-sidecar-proxy-consul-dataplane", serviceName, taskID), status: api.HealthCritical},
+			},
+			updatedContainers: map[string]string{
+				// app is now present but unhealthy
+				"app":                                ecs.HealthStatusUnhealthy,
+				config.ConsulDataplaneContainerName: ecs.HealthStatusHealthy,
+			},
+			expectedChecksAfterUpdate: []expectedCheck{
+				// Status stays critical, but output should be updated (test expects update to happen)
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-app", serviceName, taskID), status: api.HealthCritical,
+					output: fmt.Sprintf("ECS health status is %q for container %q", ecs.HealthStatusUnhealthy, fmt.Sprintf("%s-%s-app", serviceName, taskID))},
+				{serviceName: serviceName, checkID: fmt.Sprintf("%s-%s-consul-dataplane", serviceName, taskID), status: api.HealthCritical},
+				{serviceName: proxyServiceName, checkID: fmt.Sprintf("%s-%s-sidecar-proxy-consul-dataplane", serviceName, taskID), status: api.HealthCritical},
 			},
 		},
 	}
